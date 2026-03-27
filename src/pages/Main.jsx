@@ -12,6 +12,7 @@ import ProSearchButton from "../components/ProSearchButton";
 
 import UserPlaylists from "../components/UserPlaylists";
 
+import { LoadingSpinner, ErrorMessage, SuccessMessage } from "../components/UIComponents";
 import Footer from "../components/Footer";
 
 function Main() {
@@ -66,6 +67,7 @@ function Main() {
   const [error, setError] = useState(null);
 
   const [isLoading, setIsLoading] = useState(false);
+  const [success, setSuccess] = useState(null);
 
   const [proSearchStatus, setProSearchStatus] = useState(() => {
     const saved = localStorage.getItem("proSearchStatus");
@@ -576,6 +578,8 @@ function Main() {
         });
       }
 
+      setSuccess(`Thanks for the feedback! Your preferences are being updated.`);
+      setTimeout(() => setSuccess(null), 3000);
       setPlaylistRefreshTrigger((prev) => prev + 1);
     } catch (err) {
       console.error("Error sending feedback:", err);
@@ -705,6 +709,12 @@ function Main() {
             results={results}
             onFeedback={handleFeedback}
           />
+
+          {success && (
+            <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[100] w-full max-w-md px-4">
+              <SuccessMessage message={success} />
+            </div>
+          )}
 
           <UserPlaylists
             userId={userId}

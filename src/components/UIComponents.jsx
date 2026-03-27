@@ -30,6 +30,22 @@ export function ErrorMessage({ error }) {
   );
 }
 
+export function SuccessMessage({ message }) {
+  return (
+    <div className="bg-green-500/10 border-2 border-green-500/50 text-green-400 px-6 py-4 rounded-2xl relative max-w-2xl mx-auto backdrop-blur-xl animate-in fade-in slide-in-from-top-4 duration-300" role="alert">
+      <div className="flex items-start gap-4">
+        <svg className="w-6 h-6 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM14.707 9.293a1 1 0 00-1.414-1.414L10 10.586 8.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+        </svg>
+        <div>
+          <strong className="font-black text-base block mb-1">Success!</strong>
+          <span className="block text-sm">{message}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SpotifyIcon() {
   return (
     <svg

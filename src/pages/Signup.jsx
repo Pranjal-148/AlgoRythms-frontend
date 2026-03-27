@@ -138,13 +138,13 @@ function SignUp() {
       const response = await fetch(`${API_BASE_URL}/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: formData.email }),
+        body: JSON.stringify({ email: formData.email.trim().toLowerCase() }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to send OTP");
+        throw new Error(data.error || data.detail || "Failed to send OTP");
       }
 
       setOtpSent(true);
@@ -172,13 +172,17 @@ function SignUp() {
       const response = await fetch(`${API_BASE_URL}/verify-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: formData.email, otp: formData.otp }),
+        body: JSON.stringify({ 
+          email: formData.email.trim().toLowerCase(), 
+          otp: formData.otp 
+        }),
       });
 
       const data = await response.json();
+      console.log("OTP verification attempt:", { email: formData.email, otp: formData.otp });
 
       if (!response.ok) {
-        throw new Error(data.error || "OTP verification failed");
+        throw new Error(data.error || data.detail || "OTP verification failed");
       }
 
       setOtpVerified(true);
@@ -216,7 +220,7 @@ function SignUp() {
     try {
       const body = {
         fullName: formData.fullName,
-        email: formData.email,
+        email: formData.email.trim().toLowerCase(),
         password: formData.password,
       };
 
@@ -229,7 +233,7 @@ function SignUp() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Signup failed");
+        throw new Error(data.error || data.detail || "Signup failed");
       }
 
       localStorage.setItem("token", data.token);
