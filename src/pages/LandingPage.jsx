@@ -75,6 +75,7 @@ function FeatureCard({ icon, title, description }) {
 
 function LandingPage() {
   const [isVisible, setIsVisible] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   useEffect(() => {
     setIsVisible(true);
@@ -191,7 +192,7 @@ function LandingPage() {
         <nav
           className={`flex justify-between items-center py-6 px-6 mt-4 transition-all duration-700 ${isVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-4"}`}
         >
-          <Link to="/" className="group flex items-center gap-2">
+          <Link to="/" className="group flex items-center gap-2 flex-shrink-0">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#1db954] to-[#1ed760] flex items-center justify-center shadow-lg shadow-[#1db954]/30 group-hover:scale-110 transition-transform">
               <svg
                 className="w-6 h-6 text-black"
@@ -206,21 +207,72 @@ function LandingPage() {
             </span>
           </Link>
 
-          <div className="flex items-center gap-4">
+          {/* Desktop Links */}
+          <div className="hidden md:flex items-center gap-4">
             <Link
               to="/login"
-              className="text-sm font-semibold text-gray-300 hover:text-white transition-colors drop-shadow-sm"
+              className="text-sm font-semibold text-gray-300 hover:text-white transition-colors drop-shadow-sm whitespace-nowrap"
             >
               Sign In
             </Link>
             <Link
               to="/signup"
-              className="px-5 py-2.5 rounded-full text-sm font-bold bg-[#1db954] text-black hover:bg-[#1ed760] transition-all hover:scale-105 shadow-lg shadow-[#1db954]/30"
+              className="px-5 py-2.5 rounded-full text-sm font-bold bg-[#1db954] text-black hover:bg-[#1ed760] transition-all hover:scale-105 shadow-lg shadow-[#1db954]/30 whitespace-nowrap"
             >
               Get Started
             </Link>
           </div>
+
+          {/* Hamburger Icon */}
+          <div className="md:hidden flex items-center">
+            <button
+              onClick={() => setIsMenuOpen(!isMenuOpen)}
+              className="text-white hover:text-[#1db954] focus:outline-none transition-colors"
+            >
+              {isMenuOpen ? (
+                <svg className="w-8 h-8" fill="currentColor" viewBox="0 0 20 20">
+                  <path
+                    fillRule="evenodd"
+                    d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              ) : (
+                <svg className="w-8 h-8" fill="currentColor" viewBox="0 0 20 20">
+                  <path
+                    fillRule="evenodd"
+                    d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              )}
+            </button>
+          </div>
         </nav>
+
+        {/* Mobile Menu Dropdown */}
+        <div
+          className={`md:hidden absolute top-24 left-6 right-6 bg-black/95 backdrop-blur-3xl border border-white/10 rounded-2xl flex flex-col items-center py-8 space-y-6 shadow-2xl transition-all duration-300 origin-top z-[100] ${
+            isMenuOpen
+              ? "scale-y-100 opacity-100"
+              : "scale-y-0 opacity-0 pointer-events-none"
+          }`}
+        >
+          <Link
+            to="/login"
+            onClick={() => setIsMenuOpen(false)}
+            className="text-lg font-bold text-white/70 hover:text-white transition-colors"
+          >
+            Sign In
+          </Link>
+          <Link
+            to="/signup"
+            onClick={() => setIsMenuOpen(false)}
+            className="px-8 py-3 rounded-full text-lg font-bold bg-[#1db954] text-black hover:bg-[#1ed760] transition-all"
+          >
+            Get Started
+          </Link>
+        </div>
 
         {}
         <div
