@@ -15,27 +15,27 @@ function Navbar({
 
   return (
     <nav className="bg-black/40 backdrop-blur-xl border-b border-white/5 sticky top-0 z-50">
-      <div className="container mx-auto px-6 py-4 flex justify-between items-center">
+      <div className="container mx-auto px-4 sm:px-6 py-3 sm:py-4 flex justify-between items-center">
         <Link
           to="/main"
-          className="text-2xl font-black bg-gradient-to-r from-[#1db954] to-[#1ed760] bg-clip-text text-transparent tracking-tight hover:scale-105 transition-transform duration-200 z-10"
+          className="text-xl sm:text-2xl font-black bg-gradient-to-r from-[#1db954] to-[#1ed760] bg-clip-text text-transparent tracking-tight hover:scale-105 transition-transform duration-200 z-10"
         >
           AlgoRythms
         </Link>
 
         {/* Hamburger Icon */}
-        <div className="md:hidden z-10">
+        <div className="md:hidden z-10 flex items-center">
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="text-white hover:text-[#1db954] focus:outline-none transition-colors"
+            className="w-10 h-10 flex items-center justify-center rounded-full bg-white/5 text-white hover:text-[#1db954] focus:outline-none transition-all active:scale-90"
           >
             {isMobileMenuOpen ? (
-              <svg className="w-7 h-7" fill="currentColor" viewBox="0 0 20 20">
-                 <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
               </svg>
             ) : (
-              <svg className="w-7 h-7" fill="currentColor" viewBox="0 0 20 20">
-                 <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 6h16M4 12h16m-7 6h7" />
               </svg>
             )}
           </button>

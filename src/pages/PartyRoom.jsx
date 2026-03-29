@@ -60,6 +60,8 @@ function PartyRoom() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [hasInteracted, setHasInteracted] = useState(false);
+  const [showParticipants, setShowParticipants] = useState(false);
 
   const playerRef = useRef(null);
   const playerReadyRef = useRef(false);
@@ -72,6 +74,10 @@ function PartyRoom() {
   const hostIdRef = useRef(null);
   const didConnectRef = useRef(false);
   const toastIdRef = useRef(0);
+  const clockOffsetRef = useRef(0);
+  const lastHeartbeatSentAt = useRef(0);
+  const handleWsMessageRef = useRef(null);
+  const lastProcessedVersion = useRef(0);
 
   function showToast(message, type = 'info') {
     const id = ++toastIdRef.current;
@@ -141,11 +147,16 @@ function PartyRoom() {
       if (wsRef.current !== ws) return;
       reconnectAttempts = 0;
       setWsConnected(true);
-      ws.send(JSON.stringify({ event: 'join_room', data: {} }));
+      ws.send(JSON.stringify({ 
+        event: 'join_room', 
+        data: { displayName: userRef.current?.fullName || 'Guest' } 
+      }));
       if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = setInterval(() => {
-        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN)
+        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
+          lastHeartbeatSentAt.current = Date.now() / 1000;
           ws.send(JSON.stringify({ event: 'heartbeat', data: {} }));
+        }
       }, 25000);
     };
 
@@ -159,68 +170,122 @@ function PartyRoom() {
         setTimeout(() => connectWebSocket(roomCode, userId), delay);
       }
     };
+    handleWsMessageRef.current = handleWsMessage;
+    ws.onmessage = (rawEvent) => {
+      try {
+        const envelope = JSON.parse(rawEvent.data);
+        
+        // 1. Monotonic Versioning Check
+        if (envelope.v && envelope.v > 0) {
+          if (envelope.v < lastProcessedVersion.current) {
+            console.warn(`Discarding old message: ${envelope.type} v${envelope.v}`);
+            return;
+          }
+          lastProcessedVersion.current = envelope.v;
+        }
 
-    ws.onmessage = handleWsMessage;
+        // 2. Global Latency Tracking (using sent_at)
+        if (envelope.sent_at) {
+          const clientNow = Date.now() / 1000;
+          const networkLatency = clientNow - envelope.sent_at;
+          // You could blend this with existing clockOffset if needed
+          // For now, we'll store it explicitly for sync calculations
+          envelope.payload._networkLatency = networkLatency;
+          envelope.payload._sentAt = envelope.sent_at;
+        }
+
+        // 3. Dispatch to Handlers
+        handleWsMessageRef.current?.(envelope.type || envelope.event, envelope.payload || envelope.data);
+      } catch (err) {
+        console.error("Failed to parse WS message:", err);
+      }
+    };
     ws.onerror = () => {};
     return ws;
   }
 
-  function handleWsMessage(event) {
-    const { event: evtName, data } = JSON.parse(event.data);
-    console.log('WS Received:', evtName, data);
+  function handleWsMessage(type, payload) {
     const p = playerRef.current;
+    console.log('WS Dispatch:', type, payload);
 
-    switch (evtName) {
+    switch (type) {
+      case 'pong': {
+        const clientNow = Date.now() / 1000;
+        const rtt = clientNow - lastHeartbeatSentAt.current;
+        clockOffsetRef.current = payload.server_time - (clientNow - rtt / 2);
+        break;
+      }
+
       case 'sync_state':
         startTransition(() => {
           setRoomState(prev => ({
             ...prev,
-            host_id: data.host_id,
-            queue: data.queue || [],
-            participants: data.participants || [],
-            currentSong: data.currentSong,
-            is_playing: data.is_playing
+            host_id: payload.host_id,
+            queue: payload.queue || [],
+            participants: payload.participants || [],
+            currentSong: payload.currentSong,
+            is_playing: payload.is_playing
           }));
-          hostIdRef.current = data.host_id;
+          hostIdRef.current = payload.host_id;
         });
-        if (data.currentSong?.youtubeId) handleSyncPlay(data);
-        break;
-
-      case 'sync_play':
-        handleSyncPlay(data);
+        if (payload.currentSong?.youtubeId) handleSyncPlay(payload);
         break;
 
       case 'sync_playback':
-        if (data.action === 'play') {
-          if (p?.playVideo) p.playVideo();
-          const elapsed = (Date.now() / 1000) - data.timestamp;
-          if (p?.seekTo) p.seekTo(data.current_time + elapsed, true);
-        } else {
-          if (p?.pauseVideo) p.pauseVideo();
-          if (p?.seekTo) p.seekTo(data.current_time, true);
+        if (userRef.current?.id !== hostIdRef.current) {
+          if (payload.action === 'play') {
+            if (p?.playVideo) p.playVideo();
+            
+            const clientNow = Date.now() / 1000;
+            const networkLatency = payload._networkLatency || 0;
+            const serverNow = clientNow + clockOffsetRef.current;
+            const elapsedSinceEvent = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
+            
+            if (p?.seekTo) p.seekTo(Math.max(0, payload.current_time + elapsedSinceEvent), true);
+          } else {
+            if (p?.pauseVideo) p.pauseVideo();
+            if (p?.seekTo) p.seekTo(payload.current_time, true);
+          }
         }
-        setIsPlaying(data.action === 'play');
-        setRoomState(prev => prev ? { ...prev, is_playing: data.action === 'play' } : prev);
+        setIsPlaying(payload.action === 'play');
+        setRoomState(prev => prev ? { ...prev, is_playing: payload.action === 'play' } : prev);
         break;
 
       case 'sync_seek': {
-        const seekElapsed = (Date.now() / 1000) - data.timestamp;
-        if (p?.seekTo) p.seekTo(data.current_time + seekElapsed, true);
+        const clientNow = Date.now() / 1000;
+        const networkLatency = payload._networkLatency || 0;
+        const serverNow = clientNow + clockOffsetRef.current;
+        const seekElapsed = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
+        
+        if (p?.seekTo) p.seekTo(Math.max(0, payload.current_time + seekElapsed), true);
         break;
       }
 
+      case 'user_joined':
+        if (payload.participants) {
+          setRoomState(prev => prev ? { ...prev, participants: payload.participants } : prev);
+        }
+        showToast(`${payload.displayName || 'Someone'} joined the party 🎉`, 'info');
+        break;
+
+      case 'user_left':
+        if (payload.participants) {
+          setRoomState(prev => prev ? { ...prev, participants: payload.participants } : prev);
+        }
+        break;
+
       case 'queue_update':
       case 'queue_snapshot':
-        setRoomState(prev => prev ? { ...prev, queue: data.queue || [] } : prev);
+        setRoomState(prev => prev ? { ...prev, queue: payload.queue || [] } : prev);
         break;
 
       case 'host_changed':
-        setRoomState(prev => prev ? { ...prev, host_id: data.newHostId } : prev);
-        hostIdRef.current = data.newHostId;
-        if (data.newHostId === userRef.current?.id) {
+        setRoomState(prev => prev ? { ...prev, host_id: payload.newHostId } : prev);
+        hostIdRef.current = payload.newHostId;
+        if (payload.newHostId === userRef.current?.id) {
           showToast('You are now the host! 🎧', 'success');
         }
-        if (data.reason === 'host_disconnected') {
+        if (payload.reason === 'host_disconnected') {
           showToast('Host left. A new host has been assigned.', 'info');
         }
         break;
@@ -229,14 +294,19 @@ function PartyRoom() {
         setCurrentPlayback(null);
         setIsPlaying(false);
         setRoomState(prev => prev ? { ...prev, currentSong: null, is_playing: false } : prev);
+        if (p?.pauseVideo) p.pauseVideo();
         break;
 
       case 'song_blocked':
-        showToast(data.message || 'There was some problem adding your song, please find another similar song.', 'error');
+        showToast(payload.message || 'There was some problem adding your song, please find another similar song.', 'error');
         break;
 
       case 'error':
-        showToast(data.message || 'Something went wrong', 'error');
+        showToast(payload.message || 'Something went wrong', 'error');
+        break;
+
+      case 'sync_play':
+        handleSyncPlay(payload);
         break;
 
       default:
@@ -244,12 +314,12 @@ function PartyRoom() {
     }
   }
 
-  function handleSyncPlay(data) {
-    const videoId = data.videoId || data.currentSong?.youtubeId;
+  function handleSyncPlay(payload) {
+    const videoId = payload.videoId || payload.currentSong?.youtubeId;
     if (!videoId) return;
-    if (!playerReadyRef.current) { pendingSyncRef.current = data; return; }
+    if (!playerReadyRef.current) { pendingSyncRef.current = payload; return; }
 
-    const newSong = data.song || data.currentSong;
+    const newSong = payload.song || payload.currentSong;
     if (newSong) currentSongIdRef.current = newSong.songId;
 
     startTransition(() => {
@@ -258,10 +328,18 @@ function PartyRoom() {
       setRoomState(prev => prev ? { ...prev, currentSong: newSong, is_playing: true } : prev);
     });
 
-    const elapsed = (Date.now() / 1000) - (data.timestamp || 0);
-    const seekTo = (data.current_time || 0) + elapsed;
+    // Latency-Aware Sync for new song starts
+    const clientNow = Date.now() / 1000;
+    const sentAt = payload.sent_at || 0;
+    const networkLatency = sentAt > 0 ? (clientNow - sentAt) : 0;
+    const serverNow = clientNow + clockOffsetRef.current;
+    
+    // We use either network latency OR timestamp diff as backup
+    const elapsed = sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
+    const seekTo = (payload.current_time || 0) + elapsed;
+    
     if (playerRef.current?.loadVideoById) {
-      playerRef.current.loadVideoById({ videoId, startSeconds: seekTo > 0 ? seekTo : 0 });
+      playerRef.current.loadVideoById({ videoId, startSeconds: Math.max(0, seekTo) });
     }
   }
 
@@ -438,6 +516,36 @@ function PartyRoom() {
   const sortedQueue = roomState.queue || [];
   const joinUrl = `${window.location.origin}/party/${roomCode}`;
 
+  if (!hasInteracted && !isHost) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center p-6 text-center">
+        <div className="absolute inset-0 pointer-events-none overflow-hidden">
+          <div className="absolute top-[-10%] left-[-10%] w-[70vw] h-[70vw] bg-[#1db954]/10 rounded-full blur-[120px] animate-pulse" />
+        </div>
+        <div className="relative z-10 max-w-sm">
+          <div className="w-24 h-24 bg-[#1db954]/10 rounded-full flex items-center justify-center mx-auto mb-8 border border-[#1db954]/20 shadow-[0_0_50px_rgba(29,185,84,0.15)]">
+            <svg className="w-12 h-12 text-[#1db954]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+            </svg>
+          </div>
+          <h1 className="text-3xl font-black text-white mb-4 tracking-tight">Ready to join?</h1>
+          <p className="text-white/50 mb-10 font-medium leading-relaxed">
+            Tap the button below to sync with the party and unlock the audio.
+          </p>
+          <button
+            onClick={() => {
+              setHasInteracted(true);
+              playerRef.current?.playVideo?.();
+            }}
+            className="w-full px-10 py-5 bg-[#1db954] text-black rounded-full font-black text-xl hover:scale-105 active:scale-95 transition-all shadow-[0_20px_40px_rgba(29,185,84,0.3)]"
+          >
+            🎧 Tap to Join
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#050505] relative overflow-hidden text-white font-sans selection:bg-[#1db954]/30">
       {/* Top Disclaimer Bar */}
@@ -455,27 +563,81 @@ function PartyRoom() {
 
       {/* Navigation */}
       <nav className="bg-black/40 backdrop-blur-xl border-b border-white/5 sticky top-0 z-50">
-        <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center gap-4">
-            <button onClick={() => navigate('/main')} className="text-white/50 hover:text-white transition-colors">
-              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+        <div className="container mx-auto px-4 py-3 flex justify-between items-center gap-2">
+          {/* Left */}
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              onClick={() => navigate('/main')}
+              className="flex-shrink-0 w-8 h-8 flex items-center justify-center text-white/50 hover:text-white transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
             </button>
-            <h1 className="text-2xl font-black text-[#1db954] tracking-tight flex items-center gap-2">
+            <h1 className="text-lg sm:text-2xl font-black text-[#1db954] truncate tracking-tight">
               Party Mode
-              {!wsConnected && <span className="text-red-400 text-sm ml-1 animate-pulse">(Reconnecting...)</span>}
+              {!wsConnected && (
+                <span className="text-red-400 text-xs ml-1 animate-pulse hidden sm:inline">
+                  (Reconnecting...)
+                </span>
+              )}
             </h1>
+            {!wsConnected && (
+              <span className="sm:hidden w-2.5 h-2.5 rounded-full bg-red-400 animate-pulse flex-shrink-0" />
+            )}
           </div>
-          <div className="flex items-center gap-3">
-            <div className="bg-white/5 border border-white/10 px-4 py-1.5 rounded-full flex items-center gap-2">
-              <span className="text-white/50 text-sm font-bold uppercase tracking-wider">Room</span>
-              <span className="font-mono font-black text-[#1db954] tracking-widest">{roomCode}</span>
+
+          {/* Right */}
+          <div className="flex items-center gap-1.5 sm:gap-3 flex-shrink-0">
+            {/* Room code */}
+            <div className="bg-white/5 border border-white/10 px-2 sm:px-4 py-1 sm:py-1.5 rounded-full flex items-center gap-1 sm:gap-2">
+              <span className="hidden sm:inline text-white/50 text-[10px] font-black uppercase tracking-widest">
+                Room
+              </span>
+              <span className="font-mono font-black text-[#1db954] text-sm sm:text-base tracking-widest">
+                {roomCode}
+              </span>
             </div>
-            {isHost && <span className="text-xs font-black uppercase tracking-[0.2em] text-[#1db954] bg-[#1db954]/10 px-3 py-1 rounded-full border border-[#1db954]/20">Host</span>}
-            <button onClick={() => setShowQR(true)} className="p-2 bg-white/5 hover:bg-white/10 rounded-full transition-colors border border-white/10">
-              <svg className="w-5 h-5 text-white/70" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" /></svg>
+
+            {/* Host badge */}
+            {isHost && (
+              <span className="hidden sm:inline text-[10px] font-black uppercase tracking-[0.2em] text-[#1db954] bg-[#1db954]/10 px-3 py-1 rounded-full border border-[#1db954]/20">
+                Host
+              </span>
+            )}
+            {isHost && (
+              <span className="sm:hidden w-8 h-8 flex items-center justify-center bg-[#1db954]/10 rounded-full border border-[#1db954]/20 text-xs">
+                🎧
+              </span>
+            )}
+
+            {/* Participants Button */}
+            <button
+              onClick={() => setShowParticipants(true)}
+              className="relative w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full border border-white/10 transition-colors"
+            >
+              <svg className="w-4 h-4 text-white/70" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
+              </svg>
+              {(roomState?.participants?.length || 0) > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-[#1db954] rounded-full text-black text-[9px] font-black flex items-center justify-center">
+                  {roomState.participants.length}
+                </span>
+              )}
+            </button>
+
+            {/* QR Button */}
+            <button
+              onClick={() => setShowQR(true)}
+              className="w-8 h-8 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-full border border-white/10 transition-colors"
+            >
+              <svg className="w-4 h-4 text-white/70" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" /></svg>
             </button>
           </div>
         </div>
+        {!wsConnected && (
+          <div className="sm:hidden bg-red-500/10 border-t border-red-500/10 py-1 text-center text-red-100 text-[10px] font-black tracking-widest uppercase animate-pulse">
+            Connection Lost • Reconnecting
+          </div>
+        )}
       </nav>
 
       <div className="container mx-auto px-6 py-8 max-w-4xl relative z-10">
@@ -515,37 +677,48 @@ function PartyRoom() {
                   </button>
 
                   {/* Main Play/Pause Button */}
-                  <button
-                    onClick={handlePlayPause}
-                    className={`relative w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-full flex items-center justify-center transition-all duration-500 group/btn ${
-                      isHost
-                        ? 'cursor-pointer hover:scale-110 active:scale-95'
-                        : 'cursor-default'
-                    }`}
-                    style={{
-                      background: isPlaying
-                        ? 'linear-gradient(135deg, #1db954, #1ed760)'
-                        : 'linear-gradient(135deg, #ffffff, #e0e0e0)',
-                      boxShadow: isPlaying
-                        ? '0 0 30px rgba(29,185,84,0.5), inset 0 1px 0 rgba(255,255,255,0.15)'
-                        : '0 0 30px rgba(255,255,255,0.2), inset 0 1px 0 rgba(255,255,255,0.3)'
-                    }}
-                  >
-                    <div
-                      className="absolute inset-0 rounded-full opacity-0 group-hover/btn:opacity-100 transition-opacity duration-300"
-                      style={{ boxShadow: isPlaying ? '0 0 50px rgba(29,185,84,0.6)' : '0 0 50px rgba(255,255,255,0.3)' }}
-                    />
-                    {isPlaying ? (
-                      <svg className="w-8 h-8 text-black relative z-10" viewBox="0 0 24 24" fill="currentColor">
-                        <rect x="6" y="5" width="4" height="14" rx="1" />
-                        <rect x="14" y="5" width="4" height="14" rx="1" />
-                      </svg>
-                    ) : (
-                      <svg className="w-8 h-8 text-black relative z-10 ml-1" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    )}
-                  </button>
+                  {isHost ? (
+                    <button
+                      onClick={handlePlayPause}
+                      className={`relative w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-full flex items-center justify-center transition-all duration-500 group/btn hover:scale-110 active:scale-95 cursor-pointer`}
+                      style={{
+                        background: isPlaying
+                          ? 'linear-gradient(135deg, #1db954, #1ed760)'
+                          : 'linear-gradient(135deg, #ffffff, #e0e0e0)',
+                        boxShadow: isPlaying
+                          ? '0 0 30px rgba(29,185,84,0.5), inset 0 1px 0 rgba(255,255,255,0.15)'
+                          : '0 0 30px rgba(255,255,255,0.2), inset 0 1px 0 rgba(255,255,255,0.3)'
+                      }}
+                    >
+                      <div
+                        className="absolute inset-0 rounded-full opacity-0 group-hover/btn:opacity-100 transition-opacity duration-300"
+                        style={{ boxShadow: isPlaying ? '0 0 50px rgba(29,185,84,0.6)' : '0 0 50px rgba(255,255,255,0.3)' }}
+                      />
+                      {isPlaying ? (
+                        <svg className="w-8 h-8 text-black relative z-10" viewBox="0 0 24 24" fill="currentColor">
+                          <rect x="6" y="5" width="4" height="14" rx="1" />
+                          <rect x="14" y="5" width="4" height="14" rx="1" />
+                        </svg>
+                      ) : (
+                        <svg className="w-8 h-8 text-black relative z-10 ml-1" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      )}
+                    </button>
+                  ) : (
+                    <div className="relative w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-full flex items-center justify-center bg-white/5 border border-white/10 cursor-not-allowed group/btn">
+                      {isPlaying ? (
+                        <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white/20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+                      ) : (
+                        <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white/20 ml-1" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                      )}
+                      <div className="absolute inset-0 rounded-full flex items-end justify-end p-2 opacity-50 group-hover/btn:opacity-100 transition-opacity">
+                        <svg className="w-4 h-4 text-[#1db954]" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Skip Forward / Next */}
                   <button
@@ -767,6 +940,56 @@ function PartyRoom() {
 
       {/* Toast Notifications */}
       <Toast toasts={toasts} removeToast={removeToast} />
+
+      {/* Participants Drawer */}
+      {showParticipants && (
+        <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center sm:justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="absolute inset-0" onClick={() => setShowParticipants(false)} />
+          <div className="relative bg-[#111] border border-white/10 rounded-t-3xl sm:rounded-3xl w-full sm:w-80 sm:mr-4 max-h-[70vh] sm:max-h-[80vh] flex flex-col shadow-2xl animate-in slide-in-from-bottom sm:slide-in-from-right duration-300">
+            <div className="flex items-center justify-between px-6 py-5 border-b border-white/5">
+              <h3 className="font-black text-white flex items-center gap-2">
+                In this Party
+                <span className="text-xs py-0.5 px-2 bg-white/5 rounded-full text-white/40 font-bold">
+                   {roomState?.participants?.length || 0}
+                </span>
+              </h3>
+              <button onClick={() => setShowParticipants(false)} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/5 text-white/40 hover:text-white transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 px-4 py-3 space-y-2">
+              {(roomState?.participants || []).map((p) => {
+                const userId = typeof p === 'string' ? p : p.userId;
+                const displayName = typeof p === 'string' ? 'Guest' : p.displayName;
+                const isThisHost = userId === roomState?.host_id;
+                const isYou = userId === currentUser?.id;
+                const initials = displayName?.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) || '?';
+
+                return (
+                  <div key={userId} className="flex items-center gap-3 px-3 py-2 rounded-2xl hover:bg-white/5 transition-colors border border-transparent hover:border-white/5 group">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#1db954]/20 to-[#1db954]/5 border border-[#1db954]/20 flex items-center justify-center flex-shrink-0 group-hover:scale-105 transition-transform">
+                      <span className="text-[#1db954] text-xs font-black">{initials}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-white font-bold text-sm truncate block">
+                        {displayName}{isYou ? ' (You)' : ''}
+                      </span>
+                      {isThisHost && (
+                        <span className="text-[10px] font-black text-[#1db954] uppercase tracking-widest bg-[#1db954]/10 px-1.5 py-0.5 rounded-full border border-[#1db954]/20 inline-block mt-0.5">
+                          HOST
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

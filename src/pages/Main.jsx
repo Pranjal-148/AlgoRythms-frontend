@@ -509,13 +509,17 @@ function Main() {
     setIsCreatingParty(true);
     try {
       const token = localStorage.getItem('token');
+      const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
       const res = await fetch(`${API_BASE_URL}/party/create`, {
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
-        body: JSON.stringify({ userId })
+        body: JSON.stringify({ 
+          userId,
+          displayName: currentUser.fullName || 'Host'
+        })
       });
       const data = await res.json();
       if (res.ok) {
@@ -532,22 +536,29 @@ function Main() {
 
   const handleJoinParty = async (e) => {
     e.preventDefault();
-    if (!joinRoomCode.trim()) return;
+    const cleanCode = joinRoomCode.trim().toUpperCase();
+    if (!cleanCode) return;
     
     setIsJoiningParty(true);
     try {
       const token = localStorage.getItem('token');
+      const currentUser = JSON.parse(localStorage.getItem('currentUser') || '{}');
       const res = await fetch(`${API_BASE_URL}/party/join`, {
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
-        body: JSON.stringify({ userId, roomCode: joinRoomCode.trim().toUpperCase() })
+        body: JSON.stringify({ 
+          userId, 
+          roomCode: cleanCode,
+          displayName: currentUser.fullName || 'Guest'
+        })
       });
       const data = await res.json();
       if (res.ok) {
-        navigate(`/party/${data.roomCode}`);
+        // Option A: Use the cleanCode we already have to be safe
+        navigate(`/party/${cleanCode}`);
       } else {
         setError(data.error || "Failed to join party. Invalid code.");
       }
