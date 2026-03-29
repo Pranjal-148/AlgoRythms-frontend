@@ -232,19 +232,27 @@ function PartyRoom() {
         break;
 
       case 'sync_playback':
-        if (userRef.current?.id !== hostIdRef.current) {
-          if (payload.action === 'play') {
-            if (p?.playVideo) p.playVideo();
-            
-            const clientNow = Date.now() / 1000;
-            const networkLatency = payload._networkLatency || 0;
-            const serverNow = clientNow + clockOffsetRef.current;
-            const elapsedSinceEvent = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
-            
-            if (p?.seekTo) p.seekTo(Math.max(0, payload.current_time + elapsedSinceEvent), true);
-          } else {
-            if (p?.pauseVideo) p.pauseVideo();
-            if (p?.seekTo) p.seekTo(payload.current_time, true);
+        if (payload.action === 'play') {
+          console.log('[Jam] Triggering PLAY', payload);
+          if (p?.playVideo && playerReadyRef.current) {
+            p.playVideo();
+          }
+          
+          const clientNow = Date.now() / 1000;
+          const networkLatency = payload._networkLatency || 0;
+          const serverNow = clientNow + clockOffsetRef.current;
+          const elapsedSinceEvent = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
+          
+          if (p?.seekTo && playerReadyRef.current) {
+            p.seekTo(Math.max(0, payload.current_time + elapsedSinceEvent), true);
+          }
+        } else {
+          console.log('[Jam] Triggering PAUSE', payload);
+          if (p?.pauseVideo && playerReadyRef.current) {
+            p.pauseVideo();
+          }
+          if (p?.seekTo && playerReadyRef.current) {
+            p.seekTo(payload.current_time, true);
           }
         }
         setIsPlaying(payload.action === 'play');
@@ -252,12 +260,15 @@ function PartyRoom() {
         break;
 
       case 'sync_seek': {
+        console.log('[Jam] Triggering SEEK', payload);
         const clientNow = Date.now() / 1000;
         const networkLatency = payload._networkLatency || 0;
         const serverNow = clientNow + clockOffsetRef.current;
         const seekElapsed = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
         
-        if (p?.seekTo) p.seekTo(Math.max(0, payload.current_time + seekElapsed), true);
+        if (p?.seekTo && playerReadyRef.current) {
+          p.seekTo(Math.max(0, payload.current_time + seekElapsed), true);
+        }
         break;
       }
 
@@ -338,8 +349,12 @@ function PartyRoom() {
     const elapsed = sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
     const seekTo = (payload.current_time || 0) + elapsed;
     
-    if (playerRef.current?.loadVideoById) {
+    if (playerRef.current?.loadVideoById && playerReadyRef.current) {
+      console.log('[Jam] Loading Video', videoId, 'at', seekTo);
       playerRef.current.loadVideoById({ videoId, startSeconds: Math.max(0, seekTo) });
+    } else {
+      console.warn('[Jam] Player not ready for loadVideoById');
+      pendingSyncRef.current = payload;
     }
   }
 
@@ -387,9 +402,21 @@ function PartyRoom() {
   }
 
   function createPlayer() {
+    console.log('[Jam] Creating YouTube Player Instance');
+    const origin = window.location.origin;
     playerRef.current = new window.YT.Player('jam-youtube-player', {
       height: '100', width: '100',
-      playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, modestbranding: 1, origin: window.location.origin },
+      playerVars: { 
+        autoplay: 1, 
+        controls: 0, 
+        disablekb: 1, 
+        fs: 0, 
+        rel: 0, 
+        modestbranding: 1, 
+        origin: origin,
+        enablejsapi: 1,
+        widget_referrer: origin
+      },
       events: {
         onReady: () => {
           playerReadyRef.current = true;
