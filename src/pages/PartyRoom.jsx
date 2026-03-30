@@ -75,9 +75,20 @@ function PartyRoom() {
   const didConnectRef = useRef(false);
   const toastIdRef = useRef(0);
   const clockOffsetRef = useRef(0);
-  const lastHeartbeatSentAt = useRef(0);
+  const ntpSyncedRef = useRef(false);
+  const ntpDataRef = useRef([]);
+  const lastVersions = useRef(new Map());
   const handleWsMessageRef = useRef(null);
-  const lastProcessedVersion = useRef(0);
+
+  function parseISO8601Duration(duration) {
+    if (!duration) return 0;
+    const match = duration.match(/PT(\d+H)?(\d+M)?(\d+S)?/);
+    if (!match) return 0;
+    const hours = (parseInt(match[1]) || 0);
+    const minutes = (parseInt(match[2]) || 0);
+    const seconds = (parseInt(match[3]) || 0);
+    return hours * 3600 + minutes * 60 + seconds;
+  }
 
   function showToast(message, type = 'info') {
     const id = ++toastIdRef.current;
@@ -128,6 +139,13 @@ function PartyRoom() {
     };
   }, [roomCode, navigate]);
 
+  function sendNtpProbe(ws) {
+    const t0 = performance.now();
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ event: 'ntp_request', data: { t0 } }));
+    }
+  }
+
   function connectWebSocket(roomCode, userId) {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.onclose = null;
@@ -136,153 +154,201 @@ function PartyRoom() {
       wsRef.current.close(1000, 'Replacing with new connection');
     }
 
-    const token = localStorage.getItem('token');
-    const ws = new WebSocket(`${WS_URL}/party/ws/${roomCode}?token=${token}`);
-    wsRef.current = ws;
+    let attempt = 0;
+    const connect = () => {
+      const token = localStorage.getItem('token');
+      const ws = new WebSocket(`${WS_URL}/party/ws/${roomCode}?token=${token}`);
+      wsRef.current = ws;
 
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT = 5;
-
-    ws.onopen = () => {
-      if (wsRef.current !== ws) return;
-      reconnectAttempts = 0;
-      setWsConnected(true);
-      ws.send(JSON.stringify({ 
-        event: 'join_room', 
-        data: { displayName: userRef.current?.fullName || 'Guest' } 
-      }));
-      if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = setInterval(() => {
-        if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
-          lastHeartbeatSentAt.current = Date.now() / 1000;
-          ws.send(JSON.stringify({ event: 'heartbeat', data: {} }));
-        }
-      }, 25000);
-    };
-
-    ws.onclose = (e) => {
-      if (wsRef.current !== ws) return;
-      setWsConnected(false);
-      clearInterval(heartbeatIntervalRef.current);
-      if (reconnectAttempts < MAX_RECONNECT && e.code !== 4001 && e.code !== 1000) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
-        reconnectAttempts++;
-        setTimeout(() => connectWebSocket(roomCode, userId), delay);
-      }
-    };
-    handleWsMessageRef.current = handleWsMessage;
-    ws.onmessage = (rawEvent) => {
-      try {
-        const envelope = JSON.parse(rawEvent.data);
+      ws.onopen = () => {
+        if (wsRef.current !== ws) return;
+        attempt = 0;
+        setWsConnected(true);
+        ws.send(JSON.stringify({ 
+          event: 'join_room', 
+          data: { displayName: userRef.current?.fullName || 'Guest' } 
+        }));
         
-        // 1. Monotonic Versioning Check
-        if (envelope.v && envelope.v > 0) {
-          if (envelope.v < lastProcessedVersion.current) {
-            console.warn(`Discarding old message: ${envelope.type} v${envelope.v}`);
-            return;
+        ntpDataRef.current = [];
+        ntpSyncedRef.current = false;
+        sendNtpProbe(ws);
+
+        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = setInterval(() => {
+          if (wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ event: 'pong', data: {} }));
           }
-          lastProcessedVersion.current = envelope.v;
-        }
+        }, 25000);
+      };
 
-        // 2. Global Latency Tracking (using sent_at)
-        if (envelope.sent_at) {
-          const clientNow = Date.now() / 1000;
-          const networkLatency = clientNow - envelope.sent_at;
-          // You could blend this with existing clockOffset if needed
-          // For now, we'll store it explicitly for sync calculations
-          envelope.payload._networkLatency = networkLatency;
-          envelope.payload._sentAt = envelope.sent_at;
-        }
+      ws.onclose = (e) => {
+        if (wsRef.current !== ws) return;
+        setWsConnected(false);
+        clearInterval(heartbeatIntervalRef.current);
+        if (e.code === 4001 || e.code === 1000) return;
+        if (attempt >= 8) { setError('Lost connection to room'); return; }
+        
+        const base = Math.min(500 * Math.pow(2, attempt), 30000);
+        const jitter = base * 0.3 * (Math.random() * 2 - 1);
+        const delay = Math.round(base + jitter);
+        attempt++;
+        setTimeout(connect, delay);
+      };
 
-        // 3. Dispatch to Handlers
-        handleWsMessageRef.current?.(envelope.type || envelope.event, envelope.payload || envelope.data);
-      } catch (err) {
-        console.error("Failed to parse WS message:", err);
-      }
+      handleWsMessageRef.current = handleWsMessage;
+      ws.onmessage = (rawEvent) => {
+        try {
+          const envelope = JSON.parse(rawEvent.data);
+          const { type, payload, v } = envelope;
+          
+          if (v && v > 0) {
+            const lastV = lastVersions.current.get(type) ?? 0;
+            if (v <= lastV) return;
+            lastVersions.current.set(type, v);
+          }
+          
+          if (type) {
+            handleWsMessageRef.current?.(type, payload || envelope.data);
+          }
+        } catch (err) {
+          console.error('Failed to parse WS message:', err);
+        }
+      };
+      
+      ws.onerror = () => {};
     };
-    ws.onerror = () => {};
-    return ws;
+    
+    connect();
   }
 
   function handleWsMessage(type, payload) {
     const p = playerRef.current;
-    console.log('WS Dispatch:', type, payload);
-
+    
     switch (type) {
-      case 'pong': {
-        const clientNow = Date.now() / 1000;
-        const rtt = clientNow - lastHeartbeatSentAt.current;
-        clockOffsetRef.current = payload.server_time - (clientNow - rtt / 2);
+      case 'ping':
+        wsRef.current?.send(JSON.stringify({ event: 'pong', data: {} }));
+        break;
+
+      case 'ntp_response': {
+        const { t0, t1, t2 } = payload;
+        const t3 = performance.now();
+        const rtt = t3 - t0;
+        const offset = ((t1 - t0) + (t2 - t3)) / 2;
+        ntpDataRef.current.push({ rtt, offset });
+        
+        if (ntpDataRef.current.length < 5) {
+          setTimeout(() => sendNtpProbe(wsRef.current), 50 + Math.random() * 30);
+        } else {
+          const sorted = [...ntpDataRef.current].sort((a,b) => a.rtt - b.rtt);
+          const best = sorted.slice(0, 3);
+          clockOffsetRef.current = best[1].offset;
+          ntpSyncedRef.current = true;
+          console.log(`NTP synced. Offset: ${clockOffsetRef.current.toFixed(2)}ms`);
+        }
         break;
       }
 
-      case 'sync_state':
+      case 'sync_state': {
+        const { host_id, queue, participants, currentSong, is_playing, current_time, server_timestamp_ms } = payload;
         startTransition(() => {
-          setRoomState(prev => ({
-            ...prev,
-            host_id: payload.host_id,
-            queue: payload.queue || [],
-            participants: payload.participants || [],
-            currentSong: payload.currentSong,
-            is_playing: payload.is_playing
-          }));
-          hostIdRef.current = payload.host_id;
+          setRoomState(prev => ({ ...prev, host_id, queue: queue || [], participants: participants || [] }));
+          hostIdRef.current = host_id;
         });
-        if (payload.currentSong?.youtubeId) handleSyncPlay(payload);
-        break;
 
-      case 'sync_playback':
-        if (payload.action === 'play') {
-          console.log('[Jam] Triggering PLAY', payload);
-          if (p?.playVideo && playerReadyRef.current) {
-            p.playVideo();
-          }
+        if (currentSong) {
+          const networkLatencyMs = performance.now() - (server_timestamp_ms - clockOffsetRef.current);
+          const adjustedTime = current_time + (networkLatencyMs / 1000);
           
-          const clientNow = Date.now() / 1000;
-          const networkLatency = payload._networkLatency || 0;
-          const serverNow = clientNow + clockOffsetRef.current;
-          const elapsedSinceEvent = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
+          setCurrentPlayback(currentSong);
+          setIsPlaying(is_playing);
+          setRoomState(prev => prev ? { ...prev, currentSong, is_playing } : prev);
           
-          if (p?.seekTo && playerReadyRef.current) {
-            p.seekTo(Math.max(0, payload.current_time + elapsedSinceEvent), true);
-          }
-        } else {
-          console.log('[Jam] Triggering PAUSE', payload);
-          if (p?.pauseVideo && playerReadyRef.current) {
-            p.pauseVideo();
-          }
-          if (p?.seekTo && playerReadyRef.current) {
-            p.seekTo(payload.current_time, true);
+          if (playerReadyRef.current && playerRef.current) {
+            if (currentSongIdRef.current !== currentSong.songId) {
+              currentSongIdRef.current = currentSong.songId;
+              playerRef.current.loadVideoById({ videoId: currentSong.youtubeId, startSeconds: adjustedTime });
+              if (!is_playing) playerRef.current.pauseVideo();
+            } else {
+              playerRef.current.seekTo(adjustedTime, true);
+              if (!is_playing) playerRef.current.pauseVideo();
+            }
+          } else {
+            pendingSyncRef.current = {
+              youtubeId: currentSong.youtubeId,
+              seekTo: adjustedTime,
+              autoPlay: is_playing,
+              songId: currentSong.songId
+            };
           }
         }
-        setIsPlaying(payload.action === 'play');
-        setRoomState(prev => prev ? { ...prev, is_playing: payload.action === 'play' } : prev);
         break;
+      }
+
+      case 'sync_play': {
+        const { videoId, song, current_time, execute_at_ms } = payload;
+        if (currentSongIdRef.current === song.songId) break;
+        currentSongIdRef.current = song.songId;
+        
+        const localExecuteAt = execute_at_ms - clockOffsetRef.current;
+        const delayMs = Math.max(0, localExecuteAt - performance.now());
+        
+        setCurrentPlayback(song);
+        setIsPlaying(true);
+        setRoomState(prev => prev ? { ...prev, currentSong: song, is_playing: true } : prev);
+        
+        setTimeout(() => {
+          if (playerRef.current && playerReadyRef.current) {
+            playerRef.current.loadVideoById({ videoId, startSeconds: current_time });
+          } else {
+            pendingSyncRef.current = { youtubeId: videoId, seekTo: current_time, autoPlay: true, songId: song.songId };
+          }
+        }, Math.max(0, delayMs - 100));
+        break;
+      }
+
+      case 'sync_playback': {
+        const { action, current_time, execute_at_ms } = payload;
+        const localExecuteAt = execute_at_ms - clockOffsetRef.current;
+        const delayMs = Math.max(0, localExecuteAt - performance.now());
+        
+        if (action === 'play') {
+          setTimeout(() => {
+            if (playerRef.current && playerReadyRef.current) {
+              playerRef.current.seekTo(current_time, true);
+              playerRef.current.playVideo();
+            }
+          }, delayMs);
+        } else {
+          setTimeout(() => {
+            if (playerRef.current && playerReadyRef.current) {
+              playerRef.current.pauseVideo();
+              playerRef.current.seekTo(current_time, true);
+            }
+          }, delayMs);
+        }
+        setIsPlaying(action === 'play');
+        setRoomState(prev => prev ? { ...prev, is_playing: action === 'play' } : prev);
+        break;
+      }
 
       case 'sync_seek': {
-        console.log('[Jam] Triggering SEEK', payload);
-        const clientNow = Date.now() / 1000;
-        const networkLatency = payload._networkLatency || 0;
-        const serverNow = clientNow + clockOffsetRef.current;
-        const seekElapsed = payload._sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
-        
-        if (p?.seekTo && playerReadyRef.current) {
-          p.seekTo(Math.max(0, payload.current_time + seekElapsed), true);
-        }
+        const { current_time, execute_at_ms } = payload;
+        const delayMs = Math.max(0, (execute_at_ms - clockOffsetRef.current) - performance.now());
+        setTimeout(() => {
+          if (playerRef.current && playerReadyRef.current) {
+            playerRef.current.seekTo(current_time, true);
+          }
+        }, delayMs);
         break;
       }
 
       case 'user_joined':
-        if (payload.participants) {
-          setRoomState(prev => prev ? { ...prev, participants: payload.participants } : prev);
-        }
+        if (payload.participants) setRoomState(prev => prev ? { ...prev, participants: payload.participants } : prev);
         showToast(`${payload.displayName || 'Someone'} joined the party 🎉`, 'info');
         break;
 
       case 'user_left':
-        if (payload.participants) {
-          setRoomState(prev => prev ? { ...prev, participants: payload.participants } : prev);
-        }
+        if (payload.participants) setRoomState(prev => prev ? { ...prev, participants: payload.participants } : prev);
         break;
 
       case 'queue_update':
@@ -293,68 +359,25 @@ function PartyRoom() {
       case 'host_changed':
         setRoomState(prev => prev ? { ...prev, host_id: payload.newHostId } : prev);
         hostIdRef.current = payload.newHostId;
-        if (payload.newHostId === userRef.current?.id) {
-          showToast('You are now the host! 🎧', 'success');
-        }
-        if (payload.reason === 'host_disconnected') {
-          showToast('Host left. A new host has been assigned.', 'info');
-        }
+        if (payload.newHostId === userRef.current?.id) showToast('You are now the host! 🎧', 'success');
+        if (payload.reason === 'host_disconnected') showToast('Host left. A new host has been assigned.', 'info');
         break;
 
       case 'playback_ended':
         setCurrentPlayback(null);
         setIsPlaying(false);
+        currentSongIdRef.current = null;
         setRoomState(prev => prev ? { ...prev, currentSong: null, is_playing: false } : prev);
         if (p?.pauseVideo) p.pauseVideo();
         break;
 
       case 'song_blocked':
-        showToast(payload.message || 'There was some problem adding your song, please find another similar song.', 'error');
+        showToast(payload.message || 'Error playing song, skipping...', 'error');
         break;
 
       case 'error':
         showToast(payload.message || 'Something went wrong', 'error');
         break;
-
-      case 'sync_play':
-        handleSyncPlay(payload);
-        break;
-
-      default:
-        break;
-    }
-  }
-
-  function handleSyncPlay(payload) {
-    const videoId = payload.videoId || payload.currentSong?.youtubeId;
-    if (!videoId) return;
-    if (!playerReadyRef.current) { pendingSyncRef.current = payload; return; }
-
-    const newSong = payload.song || payload.currentSong;
-    if (newSong) currentSongIdRef.current = newSong.songId;
-
-    startTransition(() => {
-      setCurrentPlayback(newSong);
-      setIsPlaying(true);
-      setRoomState(prev => prev ? { ...prev, currentSong: newSong, is_playing: true } : prev);
-    });
-
-    // Latency-Aware Sync for new song starts
-    const clientNow = Date.now() / 1000;
-    const sentAt = payload.sent_at || 0;
-    const networkLatency = sentAt > 0 ? (clientNow - sentAt) : 0;
-    const serverNow = clientNow + clockOffsetRef.current;
-    
-    // We use either network latency OR timestamp diff as backup
-    const elapsed = sentAt > 0 ? networkLatency : (serverNow - (payload.timestamp || 0));
-    const seekTo = (payload.current_time || 0) + elapsed;
-    
-    if (playerRef.current?.loadVideoById && playerReadyRef.current) {
-      console.log('[Jam] Loading Video', videoId, 'at', seekTo);
-      playerRef.current.loadVideoById({ videoId, startSeconds: Math.max(0, seekTo) });
-    } else {
-      console.warn('[Jam] Player not ready for loadVideoById');
-      pendingSyncRef.current = payload;
     }
   }
 
@@ -421,17 +444,29 @@ function PartyRoom() {
         onReady: () => {
           playerReadyRef.current = true;
           setIsPlayerReady(true);
-          if (pendingSyncRef.current) { handleSyncPlay(pendingSyncRef.current); pendingSyncRef.current = null; }
+          if (pendingSyncRef.current) { 
+            const { youtubeId, seekTo, autoPlay, songId } = pendingSyncRef.current;
+            pendingSyncRef.current = null;
+            currentSongIdRef.current = songId;
+            playerRef.current.loadVideoById({ videoId: youtubeId, startSeconds: seekTo });
+            if (!autoPlay) playerRef.current.pauseVideo();
+          }
         },
         onStateChange: (e) => {
           if (e.data === window.YT.PlayerState.ENDED) handleSongEnded();
-          if (e.data === window.YT.PlayerState.PLAYING) {
-            setIsPlaying(true);
-            setRoomState(prev => prev ? { ...prev, is_playing: true } : prev);
-          }
-          if (e.data === window.YT.PlayerState.PAUSED) {
-            setIsPlaying(false);
-            setRoomState(prev => prev ? { ...prev, is_playing: false } : prev);
+          
+          const isPlayerPlaying = (e.data === window.YT.PlayerState.PLAYING);
+          const isPlayerPaused = (e.data === window.YT.PlayerState.PAUSED);
+
+          if (isPlayerPlaying || isPlayerPaused) {
+            setIsPlaying(isPlayerPlaying);
+            
+            // Only the HOST drives the shared room state. 
+            // Guests strictly follow commands and don't report local state changes back to roomState
+            // to prevent desync feedback loops.
+            if (userRef.current?.id === hostIdRef.current) {
+              setRoomState(prev => prev ? { ...prev, is_playing: isPlayerPlaying } : prev);
+            }
           }
         },
         onError: (e) => {
@@ -458,9 +493,20 @@ function PartyRoom() {
     }
     const p = playerRef.current;
     if (!p) return;
+    
+    // Explicitly determine the target state to prevent toggle mismatch
+    const nextPlayingState = !isPlaying;
     const currentTime = p.getCurrentTime?.() || 0;
+    
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ event: 'play_pause', data: { current_time: currentTime } }));
+      console.log(`[Jam] Requesting ${nextPlayingState ? 'PLAY' : 'PAUSE'} at ${currentTime}`);
+      wsRef.current.send(JSON.stringify({ 
+        event: 'play_pause', 
+        data: { 
+          current_time: currentTime,
+          isPlaying: nextPlayingState 
+        } 
+      }));
     }
   };
 
@@ -488,7 +534,13 @@ function PartyRoom() {
       console.log('WS Sending add_song:', song.youtubeId);
       wsRef.current.send(JSON.stringify({
         event: 'add_song',
-        data: { songName: song.songName, artistName: song.artistName, youtubeId: song.youtubeId, coverImageUrl: song.coverImageUrl }
+        data: { 
+          songName: song.songName, 
+          artistName: song.artistName, 
+          youtubeId: song.youtubeId, 
+          coverImageUrl: song.coverImageUrl,
+          duration_seconds: parseISO8601Duration(song.duration_seconds || 'PT0S')
+        }
       }));
     }
     setSearchResults([]);
