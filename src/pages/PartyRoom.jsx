@@ -258,7 +258,11 @@ function PartyRoom() {
         });
 
         if (currentSong) {
-          const networkLatencyMs = performance.now() - (server_timestamp_ms - clockOffsetRef.current);
+          const nowMs = ntpSyncedRef.current 
+              ? (performance.now() + clockOffsetRef.current) 
+              : (Date.now() + clockOffsetRef.current);
+          
+          const networkLatencyMs = nowMs - server_timestamp_ms;
           const adjustedTime = current_time + (networkLatencyMs / 1000);
           
           setCurrentPlayback(currentSong);
@@ -291,7 +295,10 @@ function PartyRoom() {
         if (currentSongIdRef.current === song.songId) break;
         currentSongIdRef.current = song.songId;
         
-        const localExecuteAt = execute_at_ms - clockOffsetRef.current;
+        const localExecuteAt = ntpSyncedRef.current 
+            ? execute_at_ms - clockOffsetRef.current
+            : performance.now() + Math.max(0, execute_at_ms - Date.now());
+            
         const delayMs = Math.max(0, localExecuteAt - performance.now());
         
         setCurrentPlayback(song);
@@ -310,7 +317,9 @@ function PartyRoom() {
 
       case 'sync_playback': {
         const { action, current_time, execute_at_ms } = payload;
-        const localExecuteAt = execute_at_ms - clockOffsetRef.current;
+        const localExecuteAt = ntpSyncedRef.current 
+            ? execute_at_ms - clockOffsetRef.current
+            : performance.now() + Math.max(0, execute_at_ms - Date.now());
         const delayMs = Math.max(0, localExecuteAt - performance.now());
         
         if (action === 'play') {
@@ -335,7 +344,10 @@ function PartyRoom() {
 
       case 'sync_seek': {
         const { current_time, execute_at_ms } = payload;
-        const delayMs = Math.max(0, (execute_at_ms - clockOffsetRef.current) - performance.now());
+        const localExecuteAt = ntpSyncedRef.current 
+            ? execute_at_ms - clockOffsetRef.current
+            : performance.now() + Math.max(0, execute_at_ms - Date.now());
+        const delayMs = Math.max(0, localExecuteAt - performance.now());
         setTimeout(() => {
           if (playerRef.current && playerReadyRef.current) {
             playerRef.current.seekTo(current_time, true);
@@ -355,6 +367,10 @@ function PartyRoom() {
 
       case 'queue_update':
       case 'queue_snapshot':
+        setRoomState(prev => prev ? { ...prev, queue: payload.queue || [] } : prev);
+        break;
+
+      case 'vote_update':
         setRoomState(prev => prev ? { ...prev, queue: payload.queue || [] } : prev);
         break;
 
@@ -388,6 +404,29 @@ function PartyRoom() {
     if (u && hostIdRef.current === u.id && wsRef.current?.readyState === WebSocket.OPEN) {
       const finishedId = currentSongIdRef.current || roomStateRef.current?.currentSong?.songId;
       wsRef.current.send(JSON.stringify({ event: 'song_finished', data: { songId: finishedId } }));
+    }
+  }
+
+  const getAverageRtt = () => {
+    if (ntpDataRef.current.length === 0) return 150;
+    return ntpDataRef.current.reduce((sum, item) => sum + item.rtt, 0) / ntpDataRef.current.length;
+  };
+
+  function skipSong() {
+    if (wsRef.current?.readyState === WebSocket.OPEN && roomStateRef.current?.currentSong) {
+      wsRef.current.send(JSON.stringify({
+        event: 'skip_song',
+        data: { songId: roomStateRef.current.currentSong.songId, rtt: getAverageRtt() }
+      }));
+    }
+  }
+
+  function previousSong() {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        event: 'previous_song',
+        data: { rtt: getAverageRtt() }
+      }));
     }
   }
 
@@ -506,7 +545,8 @@ function PartyRoom() {
         event: 'play_pause', 
         data: { 
           current_time: currentTime,
-          isPlaying: nextPlayingState 
+          isPlaying: nextPlayingState,
+          rtt: getAverageRtt()
         } 
       }));
     }
@@ -515,7 +555,7 @@ function PartyRoom() {
   const playSong = (videoId, songId) => {
     if (!videoId || !currentUser || currentUser.id !== roomState?.host_id) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ event: 'play_song', data: { songId: songId || videoId } }));
+      wsRef.current.send(JSON.stringify({ event: 'play_song', data: { songId: songId || videoId, rtt: getAverageRtt() } }));
     }
   };
 
@@ -749,10 +789,11 @@ function PartyRoom() {
                 <p className="text-[#1db954] text-lg font-bold truncate w-full opacity-80">{currentPlayback.artistName}</p>
 
                 <div className="flex items-center justify-center sm:justify-start gap-5 mt-6">
-                  {/* Skip Back (disabled - aesthetic only or future) */}
+                  {/* Skip Back / Previous */}
                   <button
-                    disabled
-                    className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/20 cursor-not-allowed"
+                    onClick={previousSong}
+                    disabled={!isHost}
+                    className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/40 hover:text-[#1db954] disabled:text-white/10 disabled:cursor-not-allowed transition-all duration-200 hover:scale-110 active:scale-95"
                   >
                     <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" transform="scale(-1,1) translate(-24,0)" /></svg>
                   </button>
@@ -803,8 +844,8 @@ function PartyRoom() {
 
                   {/* Skip Forward / Next */}
                   <button
-                    onClick={() => { if (isHost && sortedQueue.length > 0) playSong(sortedQueue[0]?.youtubeId, sortedQueue[0]?.songId); }}
-                    disabled={!isHost || sortedQueue.length === 0}
+                    onClick={skipSong}
+                    disabled={!isHost}
                     className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/40 hover:text-[#1db954] disabled:text-white/10 disabled:cursor-not-allowed transition-all duration-200 hover:scale-110 active:scale-95"
                   >
                     <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" /></svg>
