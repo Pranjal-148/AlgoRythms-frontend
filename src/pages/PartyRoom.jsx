@@ -157,7 +157,9 @@ function PartyRoom() {
     let attempt = 0;
     const connect = () => {
       const token = localStorage.getItem('token');
-      const ws = new WebSocket(`${PARTY_WS_URL}/party/ws/${roomCode}?token=${token}`);
+      const wsUrl = `${PARTY_WS_URL}/party/ws/${roomCode}?token=${token}`;
+      console.log(`[Jam] Connecting WebSocket to: ${wsUrl}`);
+      const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
